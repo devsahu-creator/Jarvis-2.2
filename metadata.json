@@ -1,0 +1,8 @@
+{
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
+  "name": " Jarvis 2.2",
+  "description": "AI Assistant"
+}
