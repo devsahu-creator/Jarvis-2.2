@@ -1,10 +1,10 @@
 import React, { useEffect, useRef } from 'react';
 
 interface Props {
-  isActive: boolean;
+  mode: 'idle' | 'listening' | 'speaking';
 }
 
-export const AudioVisualizer: React.FC<Props> = ({ isActive }) => {
+export const AudioVisualizer: React.FC<Props> = ({ mode }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -34,7 +34,7 @@ export const AudioVisualizer: React.FC<Props> = ({ isActive }) => {
 
       ctx.clearRect(0, 0, width, height);
 
-      if (!isActive) {
+      if (mode === 'idle') {
         // Idle State: Gentle pulse line
         ctx.beginPath();
         ctx.strokeStyle = 'rgba(0, 168, 255, 0.3)';
@@ -42,8 +42,27 @@ export const AudioVisualizer: React.FC<Props> = ({ isActive }) => {
         ctx.moveTo(0, centerY);
         ctx.lineTo(width, centerY);
         ctx.stroke();
-      } else {
-        // Active State: Complex waveform
+      } else if (mode === 'listening') {
+        // Listening State: Active Input (White/Green focus)
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#ffffff'; // White for user input
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = 'rgba(255, 255, 255, 0.5)';
+        
+        ctx.beginPath();
+        ctx.moveTo(0, centerY);
+
+        // Faster, sharper wave for voice input simulation
+        for (let x = 0; x < width; x++) {
+          const y = centerY + 
+            Math.sin((x + offset * 1.5) * 0.05) * 25 * Math.sin(x * 0.01);
+          
+          ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      } else if (mode === 'speaking') {
+        // Speaking State: Complex AI Output (Cyan)
         ctx.lineWidth = 3;
         ctx.strokeStyle = '#00f3ff';
         ctx.shadowBlur = 15;
@@ -88,7 +107,7 @@ export const AudioVisualizer: React.FC<Props> = ({ isActive }) => {
         cancelAnimationFrame(animationId);
         window.removeEventListener('resize', resize);
     };
-  }, [isActive]);
+  }, [mode]);
 
   return (
     <canvas 

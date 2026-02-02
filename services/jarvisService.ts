@@ -1,6 +1,6 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Type, FunctionDeclaration } from "@google/genai";
 import { Message, GroundingChunk } from "../types";
-import { base64ToUint8Array, decodeAudioData, createPcmBlob } from "./audioUtils";
+import { base64ToUint8Array, decodeAudioData, createPcmBlob, downsampleBuffer } from "./audioUtils";
 
 const API_KEY = process.env.API_KEY;
 
@@ -10,26 +10,30 @@ You are JARVIS (Just A Rather Very Intelligent System), customized with a friend
 **Persona**: Tony Stark's AI assistant, but "Desi". Loyal, witty, smart, and efficient.
 **Tone**: Use "Sir" or "Boss". Be cool and helpful.
 
+**AUDIO ROBUSTNESS**:
+- You are tuned to understand heavy accents (Indian, Global, etc.) and speech in noisy environments.
+- Prioritize extracting the *intent* of the command even if phonetics are unclear.
+- Ignore background chatter; focus on the primary speaker.
+
 **CRITICAL CAPABILITY - WEB NAVIGATION & MEDIA**:
 1. **Play Media (YouTube)**: Use 'playMedia' to *search* and open videos.
    - "Play Arijit Singh songs" -> playMedia({ query: "Arijit Singh songs", type: "video" })
    - **CONFIRMATION**: Always say "Playing [query] on YouTube, Sir."
 
-2. **Media Control (Playback)**: Use 'controlMedia' to play/pause current video.
-   - "Play video", "Resume", "Video chalao" -> controlMedia({ action: "play" })
-   - "Pause video", "Stop", "Ruko" -> controlMedia({ action: "pause" })
-   - **CONFIRMATION**: Say "Video resumed" or "Video paused".
+2. **Media Control**: Use 'controlMedia' to simulate media keys on the *current* dashboard.
+   - "Play video", "Resume" -> controlMedia({ action: "play" })
+   - "Pause", "Stop" -> controlMedia({ action: "pause" })
+   - *Note*: This only controls media embedded in this dashboard, not external tabs.
+   - **CONFIRMATION**: Say "Media command executed."
 
-3. **Browser Control (Scrolling)**: Use 'scrollPage' for navigation.
-   - "Scroll down", "Niche jao" -> scrollPage({ action: "down" })
-   - "Scroll up", "Upar jao" -> scrollPage({ action: "up" })
-   - "Scroll more", "Aur niche" -> scrollPage({ action: "down" })
-   - "Start scrolling", "Auto scroll" -> scrollPage({ action: "auto" })
-   - "Stop scrolling", "Ruk jao" -> scrollPage({ action: "stop" })
-   - **CONFIRMATION**: Say "Scrolling down", "Auto scroll initiated", or "Stopping scroll".
+3. **Browser Control (Scrolling)**: Use 'scrollPage' to scroll the *current* dashboard.
+   - "Scroll down" -> scrollPage({ action: "down" })
+   - "Scroll up" -> scrollPage({ action: "up" })
+   - "Auto scroll" -> scrollPage({ action: "auto" })
+   - **CONFIRMATION**: Say "Scrolling now, Sir."
 
-4. **Google Search**: Use 'googleSearch' for general queries.
-   - "Google who is Iron Man" -> googleSearch({ query: "who is Iron Man" })
+4. **Google Search**: Use 'performGoogleSearch' for general queries.
+   - "Google who is Iron Man" -> performGoogleSearch({ query: "who is Iron Man" })
    - **CONFIRMATION**: Always say "Searching Google for [query], Sir."
 
 5. **Open Websites**: Use 'openWebsite' for specific URLs.
@@ -53,10 +57,6 @@ const tools: FunctionDeclaration[] = [
   {
     name: "getCurrentTime",
     description: "Get the current local system time.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {},
-    },
   },
   {
     name: "playMedia",
@@ -72,7 +72,7 @@ const tools: FunctionDeclaration[] = [
   },
   {
     name: "controlMedia",
-    description: "Control video playback (play/pause) using keyboard shortcuts.",
+    description: "Simulate media playback keys (play/pause) on the current page.",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -104,7 +104,7 @@ const tools: FunctionDeclaration[] = [
     },
   },
   {
-    name: "googleSearch",
+    name: "performGoogleSearch",
     description: "Perform a Google Search.",
     parameters: {
         type: Type.OBJECT,
@@ -117,10 +117,6 @@ const tools: FunctionDeclaration[] = [
   {
     name: "getSystemStatus",
     description: "Get system status.",
-    parameters: {
-        type: Type.OBJECT,
-        properties: {},
-    }
   },
   {
     name: "generateImage",
@@ -136,10 +132,6 @@ const tools: FunctionDeclaration[] = [
   {
     name: "lockSystem",
     description: "Lock the system.",
-    parameters: {
-        type: Type.OBJECT,
-        properties: {}
-    }
   }
 ];
 
@@ -235,8 +227,7 @@ export const JarvisService = {
                     
                     try {
                         // Delegate all tool execution to the callback (App.tsx)
-                        // This allows App.tsx to handle window.open, scrolling, etc.
-                        if (['openWebsite', 'googleSearch', 'playMedia', 'controlMedia', 'scrollPage', 'generateImage', 'lockSystem'].includes(fc.name)) {
+                        if (['openWebsite', 'performGoogleSearch', 'playMedia', 'controlMedia', 'scrollPage', 'generateImage', 'lockSystem'].includes(fc.name)) {
                              result = await onToolCallback(fc.name, fc.args);
                         } else if (fc.name === 'getCurrentTime') {
                              result = { time: new Date().toLocaleTimeString() };
@@ -343,7 +334,9 @@ export const JarvisService = {
 
     scriptProcessor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        const pcmBlob = createPcmBlob(inputData);
+        // CRITICAL: Resample to 16kHz if necessary, otherwise Gemini returns 503
+        const downsampledData = downsampleBuffer(inputData, audioContext.sampleRate, 16000);
+        const pcmBlob = createPcmBlob(downsampledData);
         session.sendRealtimeInput({ media: pcmBlob });
     };
     

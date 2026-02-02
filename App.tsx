@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AppMode } from './types';
 import { JarvisService, VoiceStatus } from './services/jarvisService';
 import { AudioVisualizer } from './components/AudioVisualizer';
 import { ThinkingWidget } from './components/ThinkingWidget';
@@ -17,6 +16,7 @@ const App: React.FC = () => {
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState(false);
   const [lastAction, setLastAction] = useState<string | null>(null);
+  const [blockedUrl, setBlockedUrl] = useState<string | null>(null);
 
   // Refs
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -31,7 +31,7 @@ const App: React.FC = () => {
     }
   }, [audioQueue, isPlayingAudio]);
 
-  // Interruption Handling: Stop audio if user starts speaking or processing new command
+  // Interruption Handling
   useEffect(() => {
     if (voiceStatus === 'listening' || voiceStatus === 'processing') {
       stopAudioPlayback();
@@ -40,7 +40,7 @@ const App: React.FC = () => {
 
   // Clear action status after delay
   useEffect(() => {
-    if (lastAction) {
+    if (lastAction && lastAction !== "POPUP BLOCKED") {
         const timer = setTimeout(() => setLastAction(null), 3000);
         return () => clearTimeout(timer);
     }
@@ -52,47 +52,124 @@ const App: React.FC = () => {
     
     if (currentAudioSourceRef.current) {
         try {
-            // Remove listener to prevent triggering the natural 'onended' flow logic
             currentAudioSourceRef.current.onended = null;
             currentAudioSourceRef.current.stop();
-        } catch (e) {
-            // Ignore error if already stopped
-        }
+        } catch (e) { /* ignore */ }
         currentAudioSourceRef.current = null;
     }
   };
 
-  // --- Helper Functions for DOM Simulation ---
+  const testAudio = () => {
+      // Diagnostic sound to verify speakers
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      
+      osc.frequency.value = 440; // A4
+      osc.type = 'sine';
+      
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.5);
+      
+      osc.start();
+      osc.stop(ctx.currentTime + 0.5);
+      setLastAction("AUDIO CHECK: OK");
+  };
+
+  // --- Helper Functions ---
+  
+  const categorizeError = (error: any): string => {
+    const msg = (error.message || error.toString()).toLowerCase();
+    const name = error.name || '';
+
+    // 0. User Abort
+    if (name === 'AbortError' || msg.includes('aborted')) {
+        return "SESSION ENDED: USER TERMINATED UPLINK.";
+    }
+
+    // 1. Network / Offline
+    if (!navigator.onLine) {
+        return "OFFLINE: DATA UPLINK SEVERED. CHECK NETWORK CONFIGURATION.";
+    }
+    if (msg.includes('network') || msg.includes('failed to fetch') || msg.includes('connection') || msg.includes('offline')) {
+        return "CONNECTION FAILURE: UNABLE TO CONTACT REMOTE SERVER.";
+    }
+
+    // 2. Service Availability (503, 429, etc)
+    if (msg.includes('503') || msg.includes('unavailable') || msg.includes('overloaded')) {
+        return "SERVER OVERLOAD: NEURAL ENGINE AT CAPACITY. PLEASE RETRY.";
+    }
+    if (msg.includes('429') || msg.includes('quota')) {
+        return "RATE LIMIT EXCEEDED: COOLING DOWN SYSTEMS.";
+    }
+
+    // 3. Permissions
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || msg.includes('permission denied')) {
+        return "SECURITY ALERT: AUDIO INPUT ACCESS DENIED. PLEASE GRANT PERMISSION.";
+    }
+
+    // 4. Hardware
+    if (name === 'NotFoundError' || msg.includes('device not found')) {
+        return "HARDWARE MISSING: NO MICROPHONE DETECTED.";
+    }
+    if (name === 'NotReadableError' || msg.includes('concurrent') || msg.includes('busy')) {
+        return "HARDWARE CONFLICT: MICROPHONE IN USE BY ANOTHER PROCESS.";
+    }
+    if (name === 'NotSupportedError' || msg.includes('not supported')) {
+      return "COMPATIBILITY ERROR: BROWSER DOES NOT SUPPORT REQUIRED AUDIO FEATURES.";
+    }
+
+    // 5. Config / Auth
+    if (msg.includes('api key') || msg.includes('auth')) {
+        return "AUTHENTICATION FAILED: INVALID SECURITY CREDENTIALS.";
+    }
+
+    // 6. Generic/Unknown
+    return `SYSTEM ERROR: ${error.message?.toUpperCase() || 'UNKNOWN FATAL EXCEPTION'}`;
+  };
+
+  const getMediaStream = async () => {
+    try {
+        // Try high-quality constraints first with aggressive noise suppression
+        return await navigator.mediaDevices.getUserMedia({ 
+            audio: {
+                echoCancellation: { ideal: true },
+                autoGainControl: { ideal: true },
+                noiseSuppression: { ideal: true }, // Maximize noise suppression
+                channelCount: 1,
+                sampleRate: { ideal: 16000 } // Prefer native 16kHz for model compatibility
+            } 
+        });
+    } catch (err: any) {
+        console.warn("High-quality audio constraints failed, trying fallback...", err);
+        // Fallback for constraint issues or if specific features aren't supported
+        if (err.name === 'OverconstrainedError' || err.name === 'ConstraintNotSatisfiedError') {
+             return await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+        throw err;
+    }
+  };
+
   const simulateKey = (key: string, code: string) => {
-    // Simulating keyboard events for YouTube/Web control
+    let keyCode = 0;
+    if (code === 'Space') keyCode = 32;
+    if (code === 'KeyK') keyCode = 75;
+    if (code === 'KeyJ') keyCode = 74;
+    if (code === 'KeyL') keyCode = 76;
+    if (code === 'KeyF') keyCode = 70;
+    if (code === 'KeyM') keyCode = 77;
+
     const options = {
-        key: key,
-        code: code,
-        keyCode: code === 'Space' ? 32 : 0,
-        which: code === 'Space' ? 32 : 0, // Legacy support
-        bubbles: true,
-        cancelable: true,
-        view: window
+        key, code, keyCode, which: keyCode,
+        bubbles: true, cancelable: true, view: window
     };
     
-    const eventDown = new KeyboardEvent('keydown', options);
-    const eventUp = new KeyboardEvent('keyup', options);
-    const eventPress = new KeyboardEvent('keypress', options);
-
-    document.dispatchEvent(eventDown);
-    if (code === 'Space' || key.length === 1) {
-        document.dispatchEvent(eventPress);
-    }
-    document.dispatchEvent(eventUp);
-
-    // Also try focused element just in case (essential for some players)
-    if (document.activeElement && document.activeElement !== document.body) {
-        document.activeElement.dispatchEvent(eventDown);
-        if (code === 'Space' || key.length === 1) {
-            document.activeElement.dispatchEvent(eventPress);
-        }
-        document.activeElement.dispatchEvent(eventUp);
-    }
+    document.dispatchEvent(new KeyboardEvent('keydown', options));
+    document.dispatchEvent(new KeyboardEvent('keypress', options));
+    document.dispatchEvent(new KeyboardEvent('keyup', options));
   };
 
   const handleScroll = (action: 'up' | 'down' | 'auto' | 'stop') => {
@@ -101,24 +178,21 @@ const App: React.FC = () => {
         scrollIntervalRef.current = null;
     }
 
-    if (action === 'stop') {
-        return;
-    }
+    if (action === 'stop') return;
 
-    const scrollAmount = window.innerHeight * 0.7; // 70% of viewport
+    // Simulate scroll on the main container or window
+    const scrollAmount = window.innerHeight * 0.8;
 
     if (action === 'down') {
         window.scrollBy({ top: scrollAmount, behavior: 'smooth' });
     } else if (action === 'up') {
         window.scrollBy({ top: -scrollAmount, behavior: 'smooth' });
     } else if (action === 'auto') {
-        // Continuous smooth scroll
         scrollIntervalRef.current = window.setInterval(() => {
-            window.scrollBy({ top: 3, behavior: 'auto' });
-        }, 20);
+            window.scrollBy({ top: 2, behavior: 'auto' });
+        }, 16);
     }
   };
-  // -------------------------------------------
 
   const playNextAudio = async () => {
     if (audioQueue.length === 0) return;
@@ -129,7 +203,6 @@ const App: React.FC = () => {
     }
     const ctx = audioContextRef.current;
     
-    // Resume context if suspended (browser policy fix)
     if (ctx.state === 'suspended') {
       await ctx.resume();
     }
@@ -150,40 +223,23 @@ const App: React.FC = () => {
     source.start();
   };
 
-  const getMediaStream = async () => {
-    try {
-        return await navigator.mediaDevices.getUserMedia({ 
-            audio: {
-                echoCancellation: true,
-                autoGainControl: true,
-                noiseSuppression: true,
-                channelCount: 1
-            } 
-        });
-    } catch (err: any) {
-        console.warn("High-quality audio constraints failed, trying fallback...", err);
-        return await navigator.mediaDevices.getUserMedia({ 
-            audio: true 
-        });
-    }
-  };
-
   const startJarvis = async () => {
     if (isConnecting || isLiveConnected) return;
     
     setIsConnecting(true);
-    setVoiceStatus('processing'); // Visual feedback during connection
+    setVoiceStatus('processing');
     setTranscript(null);
     setErrorMsg(null);
     setGeneratedImage(null);
+    setBlockedUrl(null);
+    setAudioQueue([]);
     
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("Browser API 'navigator.mediaDevices.getUserMedia' is not available. Ensure you are using HTTPS or localhost.");
+        throw new Error("Microphone API not available (requires HTTPS).");
       }
 
-      const stream = await getMediaStream();
-
+      // Initialize Audio Context immediately on user interaction
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       }
@@ -191,24 +247,31 @@ const App: React.FC = () => {
         await audioContextRef.current.resume();
       }
 
+      const stream = await getMediaStream();
+
       liveSessionRef.current = await JarvisService.connectLive(
         audioContextRef.current,
         stream,
-        (audioBuffer) => {
-           setAudioQueue(prev => [...prev, audioBuffer]);
-        },
-        (role, text) => {
-           setTranscript({ role, text });
-        },
-        (status) => {
-           setVoiceStatus(status);
-        },
-        // Tool Callback Handler
+        (audioBuffer) => setAudioQueue(prev => [...prev, audioBuffer]),
+        (role, text) => setTranscript({ role, text }),
+        (status) => setVoiceStatus(status),
         async (name, args) => {
+            // SAFE ARGUMENT EXTRACTION
+            const safeArg = (val: any) => (val && typeof val === 'string') ? val : '';
+
+            // TOOL HANDLERS
             if (name === 'generateImage') {
-                const prompt = args.prompt;
+                const prompt = safeArg(args.prompt);
+                if (!prompt) return { error: "Missing prompt" };
+                
+                setLastAction("GENERATING IMAGE...");
                 JarvisService.generateImage(prompt).then(img => {
-                    if (img) setGeneratedImage(img);
+                    if (img) {
+                        setGeneratedImage(img);
+                        setLastAction("IMAGE RENDERED");
+                    } else {
+                        setLastAction("ERR: IMAGE GEN FAILED");
+                    }
                 });
                 return { status: "Generating image displayed to user" };
             }
@@ -217,39 +280,55 @@ const App: React.FC = () => {
                 return { status: "System locked" };
             }
             if (name === 'scrollPage') {
-                const action = args.action; 
-                handleScroll(action);
+                const action = safeArg(args.action);
+                if (!['up', 'down', 'auto', 'stop'].includes(action)) return { error: "Invalid action" };
+                handleScroll(action as any);
                 setLastAction(`SCROLL: ${action.toUpperCase()}`);
                 return { status: "Scrolled" };
             }
             if (name === 'controlMedia') {
-                const action = args.action;
+                const action = safeArg(args.action);
                 simulateKey('k', 'KeyK');
-                setLastAction(`MEDIA: ${action.toUpperCase()}`);
+                setLastAction(`MEDIA: ${action.toUpperCase() || 'TOGGLE'}`);
                 return { status: "Media toggle executed" };
             }
-            if (name === 'googleSearch') {
-                const query = args.query || 'unknown';
-                setLastAction(`SEARCHING: ${query.toUpperCase()}`);
-                const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-                window.open(url, '_blank');
-                return { status: "Search opened" };
+            
+            // URL Handlers (Search, Open, Play)
+            let url = '';
+            let actionLabel = '';
+            const query = safeArg(args.query);
+            
+            if (name === 'performGoogleSearch') { // Renamed tool
+                url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+                actionLabel = "SEARCHING";
+            } else if (name === 'playMedia') {
+                const type = safeArg(args.type) || 'video';
+                const sq = type === 'short' ? `${query} shorts` : query;
+                url = `https://www.youtube.com/results?search_query=${encodeURIComponent(sq)}`;
+                actionLabel = "PLAYING";
+            } else if (name === 'openWebsite') {
+                url = safeArg(args.url);
+                actionLabel = "OPENING";
             }
-            if (name === 'playMedia') {
-                const query = args.query || 'media';
-                const type = args.type || 'video';
-                setLastAction(`PLAYING: ${query.toUpperCase()}`);
-                const searchQuery = type === 'short' ? `${query} shorts` : query;
-                const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchQuery)}`;
-                window.open(url, '_blank');
-                return { status: "Media opened" };
+
+            if (url) {
+                setLastAction(`${actionLabel}: ${query || 'URL'}`);
+                const win = window.open(url, '_blank');
+                if (!win) {
+                    setBlockedUrl(url);
+                    setLastAction("POPUP BLOCKED");
+                    // Critical: Inform the model that the action failed so it can respond verbally
+                    return { error: "Browser blocked the popup window. User has been alerted manually." };
+                }
+                return { status: "Opened successfully" };
             }
-            if (name === 'openWebsite') {
-                 setLastAction("OPENING LINK...");
-                 const url = args.url;
-                 if (url) window.open(url, '_blank');
-                 return { status: "Website opened" };
+            
+            // Fallback for recognized tools with missing required args
+            if (['performGoogleSearch', 'playMedia', 'openWebsite'].includes(name)) {
+                setLastAction("CMD ERR: MISSING PARAMS");
+                return { error: "Missing required parameters (url or query)" };
             }
+
             return { error: "Unknown tool" };
         },
         () => {
@@ -260,17 +339,7 @@ const App: React.FC = () => {
         },
         (err) => {
            console.error("Live Session Error:", err);
-           let userMessage = "Connection Failed";
-           
-           if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-               userMessage = "Microphone Access Denied. Please allow permissions.";
-           } else if (err.message && err.message.includes('403')) {
-               userMessage = "Access Denied: Check API Key.";
-           } else if (err.message) {
-               userMessage = err.message;
-           }
-           
-           setErrorMsg(userMessage);
+           setErrorMsg(categorizeError(err));
            setIsLiveConnected(false);
            setIsConnecting(false);
            stopAudioPlayback();
@@ -280,14 +349,8 @@ const App: React.FC = () => {
       setIsLiveConnected(true);
 
     } catch (err: any) {
-      console.error("Initialization Error:", err);
-      let errorMessage = "Unknown initialization error.";
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          errorMessage = "Microphone access denied. Please grant permission.";
-      } else if (err.message) {
-          errorMessage = err.message;
-      }
-      setErrorMsg(errorMessage);
+      console.error("Init Error:", err);
+      setErrorMsg(categorizeError(err));
       setIsLiveConnected(false);
       setIsConnecting(false);
     }
@@ -298,7 +361,6 @@ const App: React.FC = () => {
       await liveSessionRef.current.disconnect();
       liveSessionRef.current = null;
     }
-    // Clean up any active intervals
     if (scrollIntervalRef.current) {
         clearInterval(scrollIntervalRef.current);
         scrollIntervalRef.current = null;
@@ -314,10 +376,7 @@ const App: React.FC = () => {
     if (errorMsg) return "SYSTEM ERROR";
     if (isConnecting) return "ESTABLISHING UPLINK...";
     if (!isLiveConnected) return "SYSTEM STANDBY";
-    
-    // Check if performing action
     if (lastAction) return lastAction;
-
     switch (voiceStatus) {
       case 'listening': return "LISTENING...";
       case 'processing': return "COMPUTING...";
@@ -329,19 +388,14 @@ const App: React.FC = () => {
   return (
     <div className="w-screen h-screen bg-black text-jarvis-cyan font-display flex flex-col relative overflow-hidden">
       
-      {/* --- HUD DECORATION LAYERS --- */}
+      {/* --- HUD DECORATION --- */}
       <div className="absolute inset-0 bg-[linear-gradient(rgba(0,243,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(0,243,255,0.03)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none"></div>
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_50%,rgba(0,0,0,0.8)_100%)] pointer-events-none"></div>
       
-      {/* --- LOCK SCREEN OVERLAY --- */}
+      {/* --- LOCK SCREEN --- */}
       {isLocked && (
         <div className="absolute inset-0 z-50 bg-black flex flex-col items-center justify-center space-y-8">
             <div className="text-red-500 text-6xl font-bold animate-pulse tracking-[0.5em]">LOCKED</div>
-            <div className="w-32 h-32 rounded-full border-4 border-red-500 flex items-center justify-center">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                </svg>
-            </div>
             <button 
                 onClick={() => setIsLocked(false)}
                 className="px-8 py-3 bg-red-900/30 border border-red-500 text-red-500 hover:bg-red-900/50 rounded font-mono uppercase"
@@ -351,14 +405,26 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* --- GENERATED IMAGE MODAL --- */}
+      {/* --- POPUP BLOCKER RECOVERY --- */}
+      {blockedUrl && (
+        <div className="absolute top-24 left-1/2 -translate-x-1/2 z-50 animate-bounce">
+            <a 
+                href={blockedUrl} 
+                target="_blank" 
+                rel="noreferrer" 
+                onClick={() => { setBlockedUrl(null); setLastAction(null); }}
+                className="bg-red-500/90 hover:bg-red-600 text-white px-6 py-3 rounded-full font-bold shadow-[0_0_20px_rgba(255,0,0,0.5)] border border-red-400 flex items-center space-x-2"
+            >
+                <span>⚠️ POPUP BLOCKED - CLICK TO OPEN</span>
+            </a>
+        </div>
+      )}
+
+      {/* --- GENERATED IMAGE --- */}
       {generatedImage && !isLocked && (
         <div className="absolute inset-0 z-40 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-8">
             <div className="relative max-w-4xl max-h-[80vh] border-2 border-jarvis-cyan rounded-lg overflow-hidden shadow-[0_0_50px_rgba(0,243,255,0.3)]">
                 <img src={`data:image/jpeg;base64,${generatedImage}`} alt="Generated" className="object-contain w-full h-full" />
-                <div className="absolute bottom-0 left-0 right-0 bg-black/70 p-2 text-center text-xs text-jarvis-cyan font-mono uppercase">
-                    Rendered by Nano Banana (Gemini 2.5 Image)
-                </div>
             </div>
             <button 
                 onClick={() => setGeneratedImage(null)}
@@ -387,21 +453,26 @@ const App: React.FC = () => {
       <main className="flex-1 flex flex-col items-center justify-center relative z-0">
         
         <div className="relative w-[300px] h-[300px] md:w-[400px] md:h-[400px] flex items-center justify-center">
-            {/* Outer Glow Ring */}
-            <div className={`absolute inset-0 rounded-full border-2 border-dashed ${errorMsg ? 'border-red-500' : (voiceStatus === 'processing' || isConnecting) ? 'border-purple-500 animate-[spin_2s_linear_infinite]' : isLiveConnected ? 'border-jarvis-cyan animate-[spin_4s_linear_infinite]' : 'border-gray-800'}`}></div>
-            {/* Inner Static Ring */}
+            {/* Rings */}
+            <div className={`absolute inset-0 rounded-full border-2 border-dashed ${
+                errorMsg ? 'border-red-500' : 
+                (voiceStatus === 'processing' || isConnecting) ? 'border-purple-500 animate-[spin_2s_linear_infinite]' : 
+                (voiceStatus === 'listening') ? 'border-white animate-[spin_3s_linear_infinite] shadow-[0_0_15px_rgba(255,255,255,0.3)]' :
+                isLiveConnected ? 'border-jarvis-cyan animate-[spin_4s_linear_infinite]' : 
+                'border-gray-800'
+            }`}></div>
             <div className={`absolute inset-4 rounded-full border ${errorMsg ? 'border-red-500/50' : 'border-jarvis-blue/30'}`}></div>
 
-            {/* Content Switcher */}
+            {/* Widget */}
             <div className={`absolute inset-10 rounded-full overflow-hidden bg-black/50 backdrop-blur-sm border shadow-[0_0_30px_rgba(0,243,255,0.2)] ${errorMsg ? 'border-red-500 shadow-[0_0_30px_rgba(255,0,0,0.2)]' : 'border-jarvis-cyan/50'}`}>
                 {(voiceStatus === 'processing' || isConnecting) ? (
                    <ThinkingWidget />
                 ) : (
-                   <AudioVisualizer isActive={voiceStatus === 'speaking' || voiceStatus === 'listening'} />
+                   <AudioVisualizer mode={voiceStatus as 'idle' | 'listening' | 'speaking'} />
                 )}
             </div>
 
-            {/* Start Button */}
+            {/* Initiate Button */}
             {!isLiveConnected && !isConnecting && (
                 <button 
                     onClick={startJarvis}
@@ -413,7 +484,7 @@ const App: React.FC = () => {
         </div>
 
         {/* Status Text */}
-        <div className={`mt-8 tracking-[0.3em] text-sm font-mono animate-pulse ${errorMsg ? 'text-red-500' : (voiceStatus === 'processing' || isConnecting) ? 'text-purple-400' : 'text-jarvis-blue'}`}>
+        <div className={`mt-8 tracking-[0.3em] text-sm font-mono animate-pulse ${errorMsg ? 'text-red-500' : (voiceStatus === 'processing' || isConnecting) ? 'text-purple-400' : voiceStatus === 'listening' ? 'text-white' : 'text-jarvis-blue'}`}>
             {getStatusText()}
         </div>
         
@@ -441,7 +512,15 @@ const App: React.FC = () => {
       </main>
 
       {/* --- FOOTER --- */}
-      <footer className="absolute bottom-0 w-full p-6 flex justify-center z-10">
+      <footer className="absolute bottom-0 w-full p-6 flex justify-center z-10 space-x-4">
+          {!isLiveConnected && !isConnecting && (
+              <button 
+                onClick={testAudio}
+                className="px-6 py-2 border border-gray-600 text-gray-400 hover:text-jarvis-cyan hover:border-jarvis-cyan rounded-full text-xs tracking-widest uppercase transition-colors"
+              >
+                  System Check
+              </button>
+          )}
           {(isLiveConnected || isConnecting) && (
               <button 
                 onClick={stopJarvis}
